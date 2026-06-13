@@ -47,7 +47,11 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: cloud-accounts-${{ matrix.name }}
-          path: release/**
+          path: |
+            release/*.deb
+            release/*.AppImage
+            release/*.exe
+            release/*.dmg
           if-no-files-found: error
           retention-days: 14
 
@@ -70,5 +74,9 @@ jobs:
         with:
           tag_name: ${{ github.ref_name }}
           name: Cloud Accounts ${{ github.ref_name }}
-          files: artifacts/**/*
+          files: |
+            artifacts/**/*.deb
+            artifacts/**/*.AppImage
+            artifacts/**/*.exe
+            artifacts/**/*.dmg
           generate_release_notes: true
