@@ -3,10 +3,10 @@ dist/
 dist-electron/
 release/
 .vite/
-.playwright-mcp/
-LoginChatGPTFlux/
 .DS_Store
 coverage/
+.playwright-mcp/
+LoginChatGPTFlux/
 *.log
 *.cache
 out/
