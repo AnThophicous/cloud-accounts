@@ -1,10 +1,15 @@
-name: Release
+name: Build and Release
 
 on:
   push:
+    branches:
+      - main
     tags:
       - "v*"
   workflow_dispatch:
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 permissions:
   contents: read
@@ -21,7 +26,7 @@ jobs:
             os: ubuntu-latest
             build_script: dist:linux
           - name: Windows
-            os: windows-latest
+            os: windows-2025
             build_script: dist:win
           - name: macOS
             os: macos-latest
@@ -29,10 +34,10 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: 22.12.0
           cache: npm
@@ -44,7 +49,7 @@ jobs:
         run: npm run ${{ matrix.build_script }}
 
       - name: Upload artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: cloud-accounts-${{ matrix.name }}
           path: |
@@ -59,24 +64,36 @@ jobs:
     name: Publish GitHub Release
     runs-on: ubuntu-latest
     needs: build
-    if: github.event_name == 'push'
+    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     permissions:
       contents: write
 
     steps:
       - name: Download all artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           path: artifacts
 
-      - name: Create release
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ github.ref_name }}
-          name: Cloud Accounts ${{ github.ref_name }}
-          files: |
-            artifacts/**/*.deb
-            artifacts/**/*.AppImage
-            artifacts/**/*.exe
-            artifacts/**/*.dmg
-          generate_release_notes: true
+      - name: Create or update release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "${{ github.ref_name }}" >/dev/null 2>&1; then
+            gh release edit "${{ github.ref_name }}" --title "Cloud Accounts ${{ github.ref_name }}"
+          else
+            gh release create "${{ github.ref_name }}" \
+              --title "Cloud Accounts ${{ github.ref_name }}" \
+              --generate-notes
+          fi
+
+      - name: Upload release assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          shopt -s globstar nullglob
+          files=(artifacts/**/*.deb artifacts/**/*.AppImage artifacts/**/*.exe artifacts/**/*.dmg)
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "No release files found."
+            exit 1
+          fi
+          gh release upload "${{ github.ref_name }}" "${files[@]}" --clobber
