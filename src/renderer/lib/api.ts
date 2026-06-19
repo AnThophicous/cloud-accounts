@@ -1,8 +1,10 @@
 import type {
+  AccentColor,
   AccountDraft,
   CloudAccountsApi,
   CloudAccountsState,
   Locale,
+  PublicAccount,
   ProviderId,
   ThemeMode,
 } from "../../shared/types";
@@ -13,9 +15,12 @@ const fallbackState: CloudAccountsState = {
   accounts: [],
   activeAccountId: null,
   onboardingSeen: false,
+  obscureEmails: false,
   platform: "linux",
+  deviceName: "This computer",
   appVersion: "browser-demo",
   themeMode: "system",
+  accentColor: "#0ea5a8",
   locale: "en",
   preferredProvider: "chatgpt",
 };
@@ -39,7 +44,10 @@ function readState(): CloudAccountsState {
       accounts: Array.isArray(parsed.accounts) ? parsed.accounts : [],
       activeAccountId: parsed.activeAccountId ?? null,
       onboardingSeen: Boolean(parsed.onboardingSeen),
+      obscureEmails: Boolean(parsed.obscureEmails),
+      deviceName: typeof parsed.deviceName === "string" && parsed.deviceName.trim() ? parsed.deviceName : "This computer",
       themeMode: parsed.themeMode === "light" || parsed.themeMode === "dark" ? parsed.themeMode : "system",
+      accentColor: typeof parsed.accentColor === "string" && parsed.accentColor.trim() ? parsed.accentColor : "#0ea5a8",
       locale: parsed.locale === "pt" || parsed.locale === "es" ? parsed.locale : "en",
       preferredProvider: parsed.preferredProvider === "claude" ? "claude" : "chatgpt",
     };
@@ -56,7 +64,7 @@ function writeState(state: CloudAccountsState): CloudAccountsState {
   return state;
 }
 
-function publicFromDraft(draft: AccountDraft, active: boolean) {
+function publicFromDraft(draft: AccountDraft, active: boolean): PublicAccount {
   const now = new Date().toISOString();
   return {
     id: crypto.randomUUID(),
@@ -69,6 +77,10 @@ function publicFromDraft(draft: AccountDraft, active: boolean) {
     resetAt: draft.resetAt,
     quotaLimit: draft.quotaLimit,
     quotaRemaining: draft.quotaRemaining,
+    usageCheckedAt: draft.usageSnapshot ? now : null,
+    usageBlockedUntil: null,
+    depletedAt: null,
+    lastTokenRefreshAt: null,
     createdAt: now,
     updatedAt: now,
     lastLoginAt: now,
@@ -132,9 +144,17 @@ export function getCloudAccountsApi(): CloudAccountsApi {
       const current = readState();
       return writeState({ ...current, onboardingSeen: true });
     },
+    async setObscureEmails(obscureEmails: boolean) {
+      const current = readState();
+      return writeState({ ...current, obscureEmails });
+    },
     async setThemeMode(themeMode: ThemeMode) {
       const current = readState();
       return writeState({ ...current, themeMode });
+    },
+    async setAccentColor(accentColor: AccentColor) {
+      const current = readState();
+      return writeState({ ...current, accentColor });
     },
     async setLocale(locale: Locale) {
       const current = readState();

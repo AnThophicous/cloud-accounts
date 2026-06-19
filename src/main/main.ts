@@ -3,14 +3,13 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { startChatGPTLogin } from "./chatgpt-login.js";
 import { CloudAccountsStore } from "./store.js";
-import type { AccountDraft, AccountPatch, Locale, ProviderId, ThemeMode } from "../shared/types.js";
+import type { AccentColor, AccountDraft, AccountPatch, Locale, ProviderId, ThemeMode } from "../shared/types.js";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const store = new CloudAccountsStore();
 const STATE_CHANGED_CHANNEL = "cloud-accounts:state-changed";
-const CODEx_USAGE_REFRESH_INTERVAL_MS = 60_000;
 
 let codexUsageRefreshTimer: NodeJS.Timeout | null = null;
 let codexUsageRefreshInFlight = false;
@@ -30,15 +29,21 @@ async function saveAccountAndBroadcast(
   await broadcastState();
 }
 
-async function refreshActiveCodexUsageAndBroadcast(): Promise<void> {
-  const state = await store.getState();
-  const active = state.accounts.find((account) => account.id === state.activeAccountId);
-  if (!active || active.provider !== "chatgpt") return;
-
-  const next = await store.refreshCodexUsage(active.id);
-  if (next.activeAccountId === state.activeAccountId) {
-    await broadcastState();
+function scheduleNextCodexUsageRefresh(): void {
+  if (codexUsageRefreshTimer) {
+    clearTimeout(codexUsageRefreshTimer);
   }
+
+  const delay = store.getNextUsageSchedulerDelayMs();
+  codexUsageRefreshTimer = setTimeout(() => {
+    void refreshActiveCodexUsageOnInterval();
+  }, delay);
+}
+
+async function refreshActiveCodexUsageAndBroadcast(options: { forceActiveRefresh?: boolean } = {}): Promise<void> {
+  await store.runUsageSchedulerTick(options);
+  await broadcastState();
+  scheduleNextCodexUsageRefresh();
 }
 
 async function refreshActiveCodexUsageOnInterval(): Promise<void> {
@@ -48,6 +53,7 @@ async function refreshActiveCodexUsageOnInterval(): Promise<void> {
     await refreshActiveCodexUsageAndBroadcast();
   } finally {
     codexUsageRefreshInFlight = false;
+    scheduleNextCodexUsageRefresh();
   }
 }
 
@@ -104,11 +110,13 @@ function registerIpc(): void {
   ipcMain.handle("cloud-accounts:remove-account", async (_event, id: string) => {
     const state = await store.removeAccount(id);
     await broadcastState();
+    scheduleNextCodexUsageRefresh();
     return state;
   });
   ipcMain.handle("cloud-accounts:clear-active-account", async () => {
     const state = await store.clearActiveAccount();
     await broadcastState();
+    scheduleNextCodexUsageRefresh();
     return state;
   });
   ipcMain.handle("cloud-accounts:set-onboarding-seen", async () => {
@@ -116,9 +124,19 @@ function registerIpc(): void {
     await broadcastState();
     return state;
   });
+  ipcMain.handle("cloud-accounts:set-obscure-emails", async (_event, enabled: boolean) => {
+    const state = await store.setObscureEmails(enabled);
+    await broadcastState();
+    return state;
+  });
   ipcMain.handle("cloud-accounts:set-theme-mode", async (_event, mode: ThemeMode) => {
     nativeTheme.themeSource = mode;
     const state = await store.setThemeMode(mode);
+    await broadcastState();
+    return state;
+  });
+  ipcMain.handle("cloud-accounts:set-accent-color", async (_event, color: AccentColor) => {
+    const state = await store.setAccentColor(color);
     await broadcastState();
     return state;
   });
@@ -137,9 +155,6 @@ function registerIpc(): void {
   });
   ipcMain.handle("cloud-accounts:start-login", async () => {
     await startChatGPTLogin({
-      onProvisionalAccount: async (provisionalAccount) => {
-        await saveAccountAndBroadcast(provisionalAccount, { syncCodexAuth: false });
-      },
       onFinalAccount: async (finalAccount) => {
         await saveAccountAndBroadcast(finalAccount);
         void refreshActiveCodexUsageAndBroadcast();
@@ -150,22 +165,19 @@ function registerIpc(): void {
   ipcMain.handle("cloud-accounts:start-claude", async () => {
     const state = await store.startClaudeCapture();
     await broadcastState();
+    scheduleNextCodexUsageRefresh();
     return state;
   });
   ipcMain.handle("cloud-accounts:refresh-usage", async () => {
-    const state = await store.getState();
-    const active = state.accounts.find((account) => account.id === state.activeAccountId);
-    if (!active || active.provider !== "chatgpt") {
-      return state;
-    }
-
-    const next = await store.refreshCodexUsage(active.id, { force: true });
+    const next = await store.runUsageSchedulerTick({ forceActiveRefresh: true });
     await broadcastState();
+    scheduleNextCodexUsageRefresh();
     return next;
   });
   ipcMain.handle("cloud-accounts:update-account", async (_event, id: string, patch: AccountPatch) => {
     const state = await store.updateAccount(id, patch);
     await broadcastState();
+    scheduleNextCodexUsageRefresh();
     return state;
   });
 }
@@ -177,9 +189,7 @@ app.whenReady().then(async () => {
   registerIpc();
   await createWindow();
   void refreshActiveCodexUsageAndBroadcast();
-  codexUsageRefreshTimer = setInterval(() => {
-    void refreshActiveCodexUsageOnInterval();
-  }, CODEx_USAGE_REFRESH_INTERVAL_MS);
+  scheduleNextCodexUsageRefresh();
 
   app.on("activate", async () => {
     if (BrowserWindow.getAllWindows().length === 0) {
@@ -190,7 +200,7 @@ app.whenReady().then(async () => {
 
 app.on("window-all-closed", () => {
   if (codexUsageRefreshTimer) {
-    clearInterval(codexUsageRefreshTimer);
+    clearTimeout(codexUsageRefreshTimer);
     codexUsageRefreshTimer = null;
   }
   if (process.platform !== "darwin") {

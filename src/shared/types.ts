@@ -2,6 +2,7 @@ export type PlatformName = "macos" | "windows" | "linux";
 export type ThemeMode = "system" | "light" | "dark";
 export type Locale = "en" | "pt" | "es";
 export type ProviderId = "chatgpt" | "claude" | "api" | "other";
+export type AccentColor = string;
 
 export type AccountStatus = "active" | "warning" | "expired" | "idle";
 
@@ -73,6 +74,10 @@ export interface StoredAccount {
   quotaLimit: number;
   quotaRemaining: number;
   usageSnapshot: CodexUsageSnapshot | null;
+  usageCheckedAt: string | null;
+  usageBlockedUntil: string | null;
+  depletedAt: string | null;
+  lastTokenRefreshAt: string | null;
   lastLoginAt: string;
   createdAt: string;
   updatedAt: string;
@@ -96,9 +101,12 @@ export interface CloudAccountsState {
   accounts: PublicAccount[];
   activeAccountId: string | null;
   onboardingSeen: boolean;
+  obscureEmails: boolean;
   platform: PlatformName;
+  deviceName: string;
   appVersion: string;
   themeMode: ThemeMode;
+  accentColor: AccentColor;
   locale: Locale;
   preferredProvider: ProviderId;
 }
@@ -138,7 +146,9 @@ export interface CloudAccountsApi {
   removeAccount(id: string): Promise<CloudAccountsState>;
   clearActiveAccount(): Promise<CloudAccountsState>;
   setOnboardingSeen(): Promise<CloudAccountsState>;
+  setObscureEmails(enabled: boolean): Promise<CloudAccountsState>;
   setThemeMode(mode: ThemeMode): Promise<CloudAccountsState>;
+  setAccentColor(color: AccentColor): Promise<CloudAccountsState>;
   setLocale(locale: Locale): Promise<CloudAccountsState>;
   setPreferredProvider(provider: ProviderId): Promise<CloudAccountsState>;
   openExternal(url: string): Promise<void>;

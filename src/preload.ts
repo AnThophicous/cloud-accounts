@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer } from "electron";
 import type {
+  AccentColor,
   AccountDraft,
   AccountPatch,
   CloudAccountsApi,
@@ -16,7 +17,11 @@ const api: CloudAccountsApi = {
   removeAccount: (id: string) => ipcRenderer.invoke("cloud-accounts:remove-account", id) as Promise<CloudAccountsState>,
   clearActiveAccount: () => ipcRenderer.invoke("cloud-accounts:clear-active-account") as Promise<CloudAccountsState>,
   setOnboardingSeen: () => ipcRenderer.invoke("cloud-accounts:set-onboarding-seen") as Promise<CloudAccountsState>,
+  setObscureEmails: (enabled: boolean) =>
+    ipcRenderer.invoke("cloud-accounts:set-obscure-emails", enabled) as Promise<CloudAccountsState>,
   setThemeMode: (mode: ThemeMode) => ipcRenderer.invoke("cloud-accounts:set-theme-mode", mode) as Promise<CloudAccountsState>,
+  setAccentColor: (color: AccentColor) =>
+    ipcRenderer.invoke("cloud-accounts:set-accent-color", color) as Promise<CloudAccountsState>,
   setLocale: (locale: Locale) => ipcRenderer.invoke("cloud-accounts:set-locale", locale) as Promise<CloudAccountsState>,
   setPreferredProvider: (provider: ProviderId) =>
     ipcRenderer.invoke("cloud-accounts:set-preferred-provider", provider) as Promise<CloudAccountsState>,

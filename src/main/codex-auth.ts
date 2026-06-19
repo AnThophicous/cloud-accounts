@@ -12,6 +12,9 @@ type CodexAuthFile = Record<string, unknown> & {
     refresh_token: string;
   } | null;
   account_id?: string | null;
+  id_token?: string | null;
+  access_token?: string | null;
+  refresh_token?: string | null;
   last_refresh?: string;
 };
 
@@ -66,6 +69,9 @@ export async function syncCodexAuthFile(account: StoredAccount | null): Promise<
       access_token: account.accessToken,
       refresh_token: account.refreshToken,
     },
+    id_token: account.idToken,
+    access_token: account.accessToken,
+    refresh_token: account.refreshToken,
     last_refresh: new Date().toISOString(),
   };
 

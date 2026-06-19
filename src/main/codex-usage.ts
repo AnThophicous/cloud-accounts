@@ -11,10 +11,22 @@ import type {
 const DEFAULT_ISSUER = "https://auth.openai.com";
 const DEFAULT_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
 
-type CodexAuthTokens = {
+export type CodexAuthTokens = {
   accessToken: string;
   refreshToken: string | null;
+  idToken: string | null;
   accountId: string | null;
+};
+
+export type CodexUsageFetchResult = {
+  snapshot: CodexUsageSnapshot;
+  refreshedAuth: {
+    accessToken: string;
+    refreshToken: string | null;
+    idToken: string | null;
+    accountId: string | null;
+    expiresAt: string | null;
+  } | null;
 };
 
 type CodexAuthFile = Record<string, unknown> & {
@@ -47,9 +59,21 @@ type CodexProfileResponse = Record<string, unknown> & {
 
 type TokenResponse = {
   access_token: string;
-  refresh_token: string;
-  id_token: string;
+  refresh_token?: string;
+  id_token?: string;
 };
+
+class HttpError extends Error {
+  status: number;
+  url: string;
+
+  constructor(url: string, status: number, statusText: string, body: string) {
+    super(`${url} failed: ${status} ${statusText}${body ? `; body=${body.slice(0, 300)}` : ""}`);
+    this.name = "HttpError";
+    this.status = status;
+    this.url = url;
+  }
+}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null;
@@ -77,6 +101,14 @@ function parseJwtClaims(jwt: string): Record<string, unknown> | null {
   } catch {
     return null;
   }
+}
+
+function parseJwtExpiration(jwt: string | null | undefined): string | null {
+  if (!jwt) return null;
+  const claims = parseJwtClaims(jwt);
+  const exp = readNumber(claims?.exp);
+  if (exp == null) return null;
+  return new Date(exp * 1000).toISOString();
 }
 
 function extractAuthClaims(claims: Record<string, unknown> | null): Record<string, unknown> | null {
@@ -134,6 +166,7 @@ async function readCodexAuthFile(): Promise<CodexAuthTokens | null> {
     return {
       accessToken,
       refreshToken: readString(parsed.tokens?.refresh_token) ?? readString(parsed.refresh_token),
+      idToken,
       accountId: readString(parsed.account_id) ?? extractAccountIdFromToken(accessToken) ?? extractAccountIdFromToken(idToken),
     };
   } catch {
@@ -313,13 +346,39 @@ async function fetchJson<T>(url: string, auth: CodexAuthTokens): Promise<T> {
 
   if (!response.ok) {
     const body = await response.text().catch(() => "");
-    throw new Error(`${url} failed: ${response.status} ${response.statusText}${body ? `; body=${body.slice(0, 300)}` : ""}`);
+    throw new HttpError(url, response.status, response.statusText, body);
   }
 
   return (await response.json()) as T;
 }
 
-async function refreshAccessToken(auth: CodexAuthTokens): Promise<CodexAuthTokens | null> {
+function isAuthFailure(error: unknown): boolean {
+  if (error instanceof HttpError) {
+    return error.status === 401 || error.status === 403;
+  }
+
+  if (error instanceof AggregateError) {
+    return error.errors.some((entry) => isAuthFailure(entry));
+  }
+
+  return false;
+}
+
+async function fetchUsageAndProfile(
+  usageUrls: string[],
+  profileUrls: string[],
+  auth: CodexAuthTokens,
+): Promise<{ usage: CodexUsageResponse; profile: CodexProfileResponse }> {
+  const usagePromise = Promise.any(usageUrls.map((url) => fetchJson<CodexUsageResponse>(url, auth)));
+  const profilePromise = Promise.any(profileUrls.map((url) => fetchJson<CodexProfileResponse>(url, auth)));
+  const [usage, profile] = await Promise.all([usagePromise, profilePromise]);
+  return { usage, profile };
+}
+
+export async function refreshAccessToken(
+  auth: CodexAuthTokens,
+  options: { persistAuthFile?: boolean } = {},
+): Promise<CodexAuthTokens | null> {
   if (!auth.refreshToken) return null;
 
   const tokenResponse = await fetch(`${DEFAULT_ISSUER}/oauth/token`, {
@@ -341,31 +400,39 @@ async function refreshAccessToken(auth: CodexAuthTokens): Promise<CodexAuthToken
   }
 
   const tokens = (await tokenResponse.json()) as TokenResponse;
+  const nextAccountId =
+    extractAccountIdFromToken(tokens.access_token) ??
+    extractAccountIdFromToken(tokens.id_token) ??
+    auth.accountId;
   const next: CodexAuthTokens = {
     accessToken: tokens.access_token,
     refreshToken: tokens.refresh_token ?? auth.refreshToken,
-    accountId: auth.accountId,
+    idToken: tokens.id_token ?? auth.idToken,
+    accountId: nextAccountId,
   };
 
-  try {
-    const raw = await fs.readFile(authFilePath(), "utf8");
-    const parsed = JSON.parse(raw) as CodexAuthFile;
-    const nextFile: CodexAuthFile = {
-      ...parsed,
-      tokens: {
-        ...(parsed.tokens ?? {}),
+  if (options.persistAuthFile !== false) {
+    try {
+      const raw = await fs.readFile(authFilePath(), "utf8");
+      const parsed = JSON.parse(raw) as CodexAuthFile;
+      const nextFile: CodexAuthFile = {
+        ...parsed,
+        tokens: {
+          ...(parsed.tokens ?? {}),
+          access_token: next.accessToken,
+          refresh_token: next.refreshToken ?? undefined,
+          id_token: next.idToken ?? parsed.tokens?.id_token,
+        },
         access_token: next.accessToken,
         refresh_token: next.refreshToken ?? undefined,
-        id_token: tokens.id_token ?? parsed.tokens?.id_token,
-      },
-      access_token: next.accessToken,
-      refresh_token: next.refreshToken ?? undefined,
-      id_token: tokens.id_token ?? parsed.tokens?.id_token,
-      account_id: next.accountId ?? parsed.account_id ?? null,
-    };
-    await writeJsonAtomic(authFilePath(), `${JSON.stringify(nextFile, null, 2)}\n`);
-  } catch {
-    // Keep the fresh token in memory even if the file rewrite fails.
+        id_token: next.idToken ?? parsed.tokens?.id_token,
+        account_id: next.accountId ?? parsed.account_id ?? null,
+        last_refresh: new Date().toISOString(),
+      };
+      await writeJsonAtomic(authFilePath(), `${JSON.stringify(nextFile, null, 2)}\n`);
+    } catch {
+      // Keep the fresh token in memory even if the file rewrite fails.
+    }
   }
 
   return next;
@@ -400,18 +467,18 @@ function mergeUsageSnapshot(
   };
 }
 
-export async function fetchCodexUsageSnapshot(): Promise<CodexUsageSnapshot | null> {
-  const auth = await readCodexAuthFile();
+export async function fetchCodexUsageSnapshot(
+  sourceAuth?: CodexAuthTokens,
+  options: { persistAuthFile?: boolean } = {},
+): Promise<CodexUsageFetchResult | null> {
+  const auth = sourceAuth ?? (await readCodexAuthFile());
   if (!auth) return null;
-
   const baseUrl = await readChatgptBaseUrl();
   const usageUrls = resolveUsageCandidates(baseUrl);
   const profileUrls = resolveProfileCandidates(baseUrl);
 
   try {
-    const usagePromise = Promise.any(usageUrls.map((url) => fetchJson<CodexUsageResponse>(url, auth)));
-    const profilePromise = Promise.any(profileUrls.map((url) => fetchJson<CodexProfileResponse>(url, auth)));
-    const [usage, profile] = await Promise.all([usagePromise, profilePromise]);
+    const { usage, profile } = await fetchUsageAndProfile(usageUrls, profileUrls, auth);
 
     const hasUsageData = Boolean(usage?.rate_limit);
     const hasProfileData = Boolean(
@@ -419,17 +486,49 @@ export async function fetchCodexUsageSnapshot(): Promise<CodexUsageSnapshot | nu
     );
 
     if ((!hasUsageData || !hasProfileData) && auth.refreshToken) {
-      const refreshed = await refreshAccessToken(auth);
+      const refreshed = await refreshAccessToken(auth, options);
       if (!refreshed) return null;
-      const [retryUsage, retryProfile] = await Promise.all([
-        Promise.any(usageUrls.map((url) => fetchJson<CodexUsageResponse>(url, refreshed))),
-        Promise.any(profileUrls.map((url) => fetchJson<CodexProfileResponse>(url, refreshed))),
-      ]);
-      return mergeUsageSnapshot(retryUsage ?? null, retryProfile ?? null);
+      const { usage: retryUsage, profile: retryProfile } = await fetchUsageAndProfile(usageUrls, profileUrls, refreshed);
+      return {
+        snapshot: mergeUsageSnapshot(retryUsage ?? null, retryProfile ?? null),
+        refreshedAuth: {
+          accessToken: refreshed.accessToken,
+          refreshToken: refreshed.refreshToken,
+          idToken: refreshed.idToken,
+          accountId: refreshed.accountId,
+          expiresAt: parseJwtExpiration(refreshed.accessToken),
+        },
+      };
     }
 
-    return mergeUsageSnapshot(usage, profile);
+    return {
+      snapshot: mergeUsageSnapshot(usage, profile),
+      refreshedAuth: null,
+    };
   } catch (error) {
+    if (auth.refreshToken && isAuthFailure(error)) {
+      try {
+        const refreshed = await refreshAccessToken(auth, options);
+        if (!refreshed) return null;
+        const { usage, profile } = await fetchUsageAndProfile(usageUrls, profileUrls, refreshed);
+        return {
+          snapshot: mergeUsageSnapshot(usage ?? null, profile ?? null),
+          refreshedAuth: {
+            accessToken: refreshed.accessToken,
+            refreshToken: refreshed.refreshToken,
+            idToken: refreshed.idToken,
+            accountId: refreshed.accountId,
+            expiresAt: parseJwtExpiration(refreshed.accessToken),
+          },
+        };
+      } catch (refreshError) {
+        console.warn(
+          `Codex usage refresh retry failed: ${refreshError instanceof Error ? refreshError.message : String(refreshError)}`,
+        );
+        return null;
+      }
+    }
+
     console.warn(
       `Codex usage refresh failed: ${error instanceof Error ? error.message : String(error)}`,
     );

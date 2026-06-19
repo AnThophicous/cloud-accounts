@@ -7,6 +7,7 @@ const DEFAULT_ISSUER = "https://auth.openai.com";
 const DEFAULT_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
 const DEFAULT_PORT = 1455;
 const FALLBACK_PORT = 1457;
+let activeLoginCancel: (() => void) | null = null;
 
 type JwtClaims = {
   email?: string;
@@ -52,7 +53,6 @@ type LoginOptions = {
   issuer?: string;
   clientId?: string;
   allowedWorkspaceIds?: string[];
-  onProvisionalAccount?: (account: ChatGPTLoginAccountSeed) => Promise<void> | void;
   onFinalAccount?: (account: ChatGPTLoginAccountSeed) => Promise<void> | void;
 };
 
@@ -285,24 +285,6 @@ async function exchangeCodeForTokens(
   return (await response.json()) as TokenResponse;
 }
 
-function buildProvisionalAccount(loginSessionId: string): ChatGPTLoginAccountSeed {
-  return {
-    loginSessionId,
-    name: "ChatGPT Connected",
-    email: "",
-    accountId: null,
-    planType: null,
-    accessToken: "pending",
-    refreshToken: "pending",
-    idToken: "pending",
-    expiresAt: new Date(Date.now() + 1000 * 60 * 10).toISOString(),
-    resetAt: new Date(Date.now() + 1000 * 60 * 60).toISOString(),
-    quotaLimit: 100,
-    quotaRemaining: 100,
-    provider: "chatgpt",
-  };
-}
-
 function mapTokenResponse(tokens: TokenResponse, loginSessionId: string): ChatGPTLoginAccountSeed {
   const claims = parseJwtClaims(tokens.id_token);
   const expiresAt = parseJwtExpiration(tokens.access_token) ?? new Date(Date.now() + 1000 * 60 * 60 * 24);
@@ -332,7 +314,9 @@ function mapTokenResponse(tokens: TokenResponse, loginSessionId: string): ChatGP
   };
 }
 
-export async function startChatGPTLogin(options: LoginOptions = {}): Promise<ChatGPTLoginAccountSeed> {
+export async function startChatGPTLogin(options: LoginOptions = {}): Promise<void> {
+  activeLoginCancel?.();
+  activeLoginCancel = null;
   const issuer = options.issuer ?? DEFAULT_ISSUER;
   const clientId = options.clientId ?? DEFAULT_CLIENT_ID;
   const { codeVerifier, codeChallenge } = generatePkce();
@@ -341,25 +325,41 @@ export async function startChatGPTLogin(options: LoginOptions = {}): Promise<Cha
   const portCandidates = [DEFAULT_PORT, FALLBACK_PORT];
 
   for (const port of portCandidates) {
-    const result = await new Promise<ChatGPTLoginAccountSeed | null>((resolve, reject) => {
+    const result = await new Promise<boolean>((resolve, reject) => {
       let settled = false;
       let callbackPort = port;
       let timeout: ReturnType<typeof setTimeout> | undefined;
       let server!: http.Server;
 
-      const finish = (value: ChatGPTLoginAccountSeed | null) => {
+      const cleanup = () => {
+        clearTimeout(timeout);
+        if (activeLoginCancel === cancel) {
+          activeLoginCancel = null;
+        }
+      };
+
+      const closeServer = () => {
+        cleanup();
+        server.close();
+      };
+
+      const finish = (value: boolean) => {
         if (settled) return;
         settled = true;
-        clearTimeout(timeout);
         resolve(value);
-        void server.close();
       };
 
       const fail = (error: Error) => {
         if (settled) return;
         settled = true;
-        clearTimeout(timeout);
-        server.close(() => reject(error));
+        closeServer();
+        reject(error);
+      };
+
+      const cancel = () => {
+        if (settled) return;
+        settled = true;
+        closeServer();
       };
 
       server = http.createServer((req, res) => {
@@ -424,9 +424,7 @@ export async function startChatGPTLogin(options: LoginOptions = {}): Promise<Cha
                 "Your account is connected. Cloud Accounts will update immediately.",
               ),
             );
-            const provisional = buildProvisionalAccount(loginSessionId);
-            await options.onProvisionalAccount?.(provisional);
-            finish(provisional);
+            closeServer();
             void (async () => {
               try {
                 const tokens = await exchangeCodeForTokens(
@@ -443,6 +441,7 @@ export async function startChatGPTLogin(options: LoginOptions = {}): Promise<Cha
                 console.warn(`ChatGPT login finalization failed: ${message}`);
               }
             })();
+            finish(true);
           } catch (error_) {
             const message = error_ instanceof Error ? error_.message : "Unknown login error.";
             res.writeHead(500, { "Content-Type": "text/html; charset=utf-8" });
@@ -457,7 +456,7 @@ export async function startChatGPTLogin(options: LoginOptions = {}): Promise<Cha
         if (/EADDRINUSE/i.test(message)) {
           settled = true;
           clearTimeout(timeout);
-          resolve(null);
+          resolve(false);
           return;
         }
         fail(error instanceof Error ? error : new Error(message));
@@ -477,7 +476,9 @@ export async function startChatGPTLogin(options: LoginOptions = {}): Promise<Cha
           state,
           options.allowedWorkspaceIds,
         );
+        activeLoginCancel = cancel;
         void shell.openExternal(authUrl);
+        finish(true);
       });
 
       timeout = setTimeout(() => {
@@ -486,7 +487,7 @@ export async function startChatGPTLogin(options: LoginOptions = {}): Promise<Cha
     });
 
     if (result) {
-      return result;
+      return;
     }
   }
 
